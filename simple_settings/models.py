@@ -11,23 +11,33 @@ SIMPLE_SETTINGS_CACHE_ALIAS = getattr(_settings, 'SIMPLE_SETTINGS_CACHE_ALIAS', 
 SIMPLE_SETTINGS_CACHE_KEY = 'simple_settings:all'
 cache = get_cache(SIMPLE_SETTINGS_CACHE_ALIAS)
 
+def get_cache_item_key(key):
+    return SIMPLE_SETTINGS_CACHE_KEY.replace('all', key)
 
 class SettingsManager(models.Manager):
     def to_dict(self):
-        """Returns a dict like key => value"""
-        obj = cache.get(SIMPLE_SETTINGS_CACHE_KEY, default={})
-        if not obj:
-            for s in self.all():
-                if s.value_type == 'bool':
-                    obj[str(s.key)] = True if s.value.lower() == "true" else False
-                else:
-                    obj[str(s.key)] = globals()['__builtins__'][s.value_type](s.value)
-            cache.set(SIMPLE_SETTINGS_CACHE_KEY, obj, timeout=SIMPLE_SETTINGS_CACHE_TIMEOUT)
-        return obj
+        result = {}
+        for s in self.all():
+            value = s.to_python()
+            result[s.key] = value
+            cache.set(get_cache_item_key(s.key), value)
+
+        return result
 
     def get_item(self, key, default=None):
         """Returns setting ``value`` of ``key`` or ``default`` if ``key`` was not found."""
-        return self.to_dict().get(key, default)
+        cache_key = get_cache_item_key(key)
+        value = cache.get(cache_key)
+
+        if value is None:
+            try:
+                value = self.get(key=key).to_python()
+            except Settings.DoesNotExist:
+                value = default
+            else:
+                cache.set(cache_key, value)
+
+        return value
 
     def set_item(self, key, value):
         """Sets setting ``key`` to ``value```"""
@@ -41,6 +51,8 @@ class SettingsManager(models.Manager):
             obj.value = value
             obj.value_type = value_type
             obj.save()
+
+	    cache.set(get_cache_item_key(obj.key), obj.value)
         return obj
 
     def del_item(self, key):
@@ -49,6 +61,8 @@ class SettingsManager(models.Manager):
             self.get(key=key).delete()
         except self.model.DoesNotExist:
             raise KeyError(key)
+	else:
+	    cache.delete(get_cache_item_key(key))
 
     def clear_cache(self):
         """Clear cache of settings"""
@@ -88,6 +102,14 @@ class Settings(models.Model):
             except ValueError:
                 raise ValidationError({'value': [_('Incorrect integer value')]})
 
+    def to_python(self):
+        if self.value_type == 'bool':
+            result = True if self.value.lower() == "true" else False
+        else:
+            result = globals()['__builtins__'][self.value_type](self.value)
+
+        return result
+
 
 @receiver(signal=post_save, sender=Settings)
 @receiver(signal=post_delete, sender=Settings)
@@ -95,3 +117,4 @@ def settings_update_handler(**kwargs):
     """Clear settings cache"""
     instance = kwargs.pop('instance')
     instance._default_manager.clear_cache()
+
